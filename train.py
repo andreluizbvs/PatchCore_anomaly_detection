@@ -1,16 +1,14 @@
 import argparse
 import torch
 from torch.nn import functional as F
-from torch import nn
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
-import cv2
 import numpy as np
 import os
 import glob
 import shutil
 from PIL import Image
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, auc, roc_curve,f1_score,average_precision_score,precision_recall_curve, balanced_accuracy_score
 from torch import nn
 import pytorch_lightning as pl
 from sklearn.metrics import confusion_matrix
@@ -18,7 +16,15 @@ import pickle
 from sampling_methods.kcenter_greedy import kCenterGreedy
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.neighbors import NearestNeighbors
-from scipy.ndimage import gaussian_filter
+from scipy.optimize import brentq
+from scipy.interpolate import interp1d
+from beautifultable import BeautifulTable
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+import time
 
 def copy_files(src, dst, ignores=[]):
     src_files = os.listdir(src)
@@ -80,16 +86,17 @@ class MVTecDataset(Dataset):
             self.img_path = os.path.join(root, 'train')
         else:
             self.img_path = os.path.join(root, 'test')
-            self.gt_path = os.path.join(root, 'ground_truth')
+            # self.gt_path = os.path.join(root, 'ground_truth')
         self.transform = transform
         self.gt_transform = gt_transform
         # load dataset
-        self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset() # self.labels => good : 0, anomaly : 1
+        self.img_paths,  self.labels, self.types = self.load_dataset() # self.labels => good : 0, anomaly : 1
+        # self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset() # self.labels => good : 0, anomaly : 1
 
     def load_dataset(self):
 
         img_tot_paths = []
-        gt_tot_paths = []
+        # gt_tot_paths = []
         tot_labels = []
         tot_types = []
 
@@ -97,53 +104,58 @@ class MVTecDataset(Dataset):
         
         for defect_type in defect_types:
             if defect_type == 'good':
-                img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
+                img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.jpg")
+                # img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
                 img_tot_paths.extend(img_paths)
-                gt_tot_paths.extend([0]*len(img_paths))
+                # gt_tot_paths.extend([0]*len(img_paths))
                 tot_labels.extend([0]*len(img_paths))
                 tot_types.extend(['good']*len(img_paths))
             else:
-                img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
-                gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
+                img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.jpg")
+                # img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
+                # gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
                 img_paths.sort()
-                gt_paths.sort()
+                # gt_paths.sort()
                 img_tot_paths.extend(img_paths)
-                gt_tot_paths.extend(gt_paths)
+                # gt_tot_paths.extend(gt_paths)
                 tot_labels.extend([1]*len(img_paths))
                 tot_types.extend([defect_type]*len(img_paths))
 
-        assert len(img_tot_paths) == len(gt_tot_paths), "Something wrong with test and ground truth pair!"
+        # assert len(img_tot_paths) == len(gt_tot_paths), "Something wrong with test and ground truth pair!"
         
-        return img_tot_paths, gt_tot_paths, tot_labels, tot_types
+        # return img_tot_paths, gt_tot_paths, tot_labels, tot_types
+        return img_tot_paths,  tot_labels, tot_types
 
     def __len__(self):
         return len(self.img_paths)
 
     def __getitem__(self, idx):
-        img_path, gt, label, img_type = self.img_paths[idx], self.gt_paths[idx], self.labels[idx], self.types[idx]
+        img_path,  label, img_type = self.img_paths[idx],  self.labels[idx], self.types[idx]
+        # img_path, gt, label, img_type = self.img_paths[idx], self.gt_paths[idx], self.labels[idx], self.types[idx]
         img = Image.open(img_path).convert('RGB')
         img = self.transform(img)
-        if gt == 0:
-            gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
-        else:
-            gt = Image.open(gt)
-            gt = self.gt_transform(gt)
+        # if gt == 0:
+        #     gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
+        # else:
+        #     gt = Image.open(gt)
+        #     gt = self.gt_transform(gt)
         
-        assert img.size()[1:] == gt.size()[1:], "image.size != gt.size !!!"
+        # assert img.size()[1:] == gt.size()[1:], "image.size != gt.size !!!"
 
-        return img, gt, label, os.path.basename(img_path[:-4]), img_type
+        return img,  label, os.path.basename(img_path[:-4]), img_type
+        # return img, gt, label, os.path.basename(img_path[:-4]), img_type
 
 
-def cvt2heatmap(gray):
-    heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
-    return heatmap
+# def cvt2heatmap(gray):
+#     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
+#     return heatmap
 
-def heatmap_on_image(heatmap, image):
-    if heatmap.shape != image.shape:
-        heatmap = cv2.resize(heatmap, (image.shape[0], image.shape[1]))
-    out = np.float32(heatmap)/255 + np.float32(image)/255
-    out = out / np.max(out)
-    return np.uint8(255 * out)
+# def heatmap_on_image(heatmap, image):
+#     if heatmap.shape != image.shape:
+#         heatmap = cv2.resize(heatmap, (image.shape[0], image.shape[1]))
+#     out = np.float32(heatmap)/255 + np.float32(image)/255
+#     out = out / np.max(out)
+#     return np.uint8(255 * out)
 
 def min_max_norm(image):
     a_min, a_max = image.min(), image.max()
@@ -187,6 +199,7 @@ class STPM(pl.LightningModule):
         for param in self.model.parameters():
             param.requires_grad = False
 
+        self.epoch_num = 0
         self.model.layer2[-1].register_forward_hook(hook_t)
         self.model.layer3[-1].register_forward_hook(hook_t)
 
@@ -208,8 +221,8 @@ class STPM(pl.LightningModule):
         self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
 
     def init_results_list(self):
-        self.gt_list_px_lvl = []
-        self.pred_list_px_lvl = []
+        # self.gt_list_px_lvl = []
+        # self.pred_list_px_lvl = []
         self.gt_list_img_lvl = []
         self.pred_list_img_lvl = []
         self.img_path_list = []        
@@ -222,21 +235,21 @@ class STPM(pl.LightningModule):
         _ = self.model(x_t)
         return self.features
 
-    def save_anomaly_map(self, anomaly_map, input_img, gt_img, file_name, x_type):
-        if anomaly_map.shape != input_img.shape:
-            anomaly_map = cv2.resize(anomaly_map, (input_img.shape[0], input_img.shape[1]))
-        anomaly_map_norm = min_max_norm(anomaly_map)
-        anomaly_map_norm_hm = cvt2heatmap(anomaly_map_norm*255)
+    # def save_anomaly_map(self, anomaly_map, input_img, gt_img, file_name, x_type):
+    #     if anomaly_map.shape != input_img.shape:
+    #         anomaly_map = cv2.resize(anomaly_map, (input_img.shape[0], input_img.shape[1]))
+    #     anomaly_map_norm = min_max_norm(anomaly_map)
+    #     anomaly_map_norm_hm = cvt2heatmap(anomaly_map_norm*255)
 
-        # anomaly map on image
-        heatmap = cvt2heatmap(anomaly_map_norm*255)
-        hm_on_img = heatmap_on_image(heatmap, input_img)
+    #     # anomaly map on image
+    #     heatmap = cvt2heatmap(anomaly_map_norm*255)
+    #     hm_on_img = heatmap_on_image(heatmap, input_img)
 
-        # save images
-        cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}.jpg'), input_img)
-        cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_amap.jpg'), anomaly_map_norm_hm)
-        cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_amap_on_img.jpg'), hm_on_img)
-        cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
+    #     # save images
+    #     cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}.jpg'), input_img)
+    #     cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_amap.jpg'), anomaly_map_norm_hm)
+    #     cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_amap_on_img.jpg'), hm_on_img)
+    #     cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
 
     def train_dataloader(self):
         image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train')
@@ -261,7 +274,7 @@ class STPM(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
-        x, _, _, file_name, _ = batch
+        x, _, file_name, _ = batch
         features = self(x)
         embeddings = []
         for feature in features:
@@ -282,12 +295,23 @@ class STPM(pl.LightningModule):
         
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
-        with open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'wb') as f:
+        
+        with open(os.path.join(self.embedding_dir_path, 'embedding'+str(self.epoch_num)+'.pickle'), 'wb') as f:
             pickle.dump(self.embedding_coreset, f)
+        # with open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'wb') as f:
+        #     pickle.dump(self.embedding_coreset, f)
+
+        self.epoch_num+=1
 
     def test_step(self, batch, batch_idx): # Nearest Neighbour Search
-        self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
-        x, gt, label, file_name, x_type = batch
+        start = time.time()
+        self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding_77.5b-accuracy.pickle'), 'rb'))
+        # self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding'+str(self.epoch_num)+'.pickle'), 'rb'))
+        # self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
+        # self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))[-(2*2587):-2587,:]
+        # print(self.embedding_coreset.shape)
+        x, label, file_name, _ = batch
+        # x, gt, label, file_name, x_type = batch
         # extract embedding
         features = self(x)
         embeddings = []
@@ -297,37 +321,114 @@ class STPM(pl.LightningModule):
         embedding_ = embedding_concat(embeddings[0], embeddings[1])
         embedding_test = np.array(reshape_embedding(np.array(embedding_)))
         # NN
-        nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='ball_tree', metric='minkowski', p=2).fit(self.embedding_coreset)
+        nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='brute', metric='minkowski', p=2).fit(self.embedding_coreset)
         score_patches, _ = nbrs.kneighbors(embedding_test)
-        anomaly_map = score_patches[:,0].reshape((28,28))
+        # anomaly_map = score_patches[:,0].reshape((28,28))
         N_b = score_patches[np.argmax(score_patches[:,0])]
         w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
         score = w*max(score_patches[:,0]) # Image-level score
+        inference_time = time.time() - start
+        print(float(inference_time))
         
-        gt_np = gt.cpu().numpy()[0,0].astype(int)
-        anomaly_map_resized = cv2.resize(anomaly_map, (args.input_size, args.input_size))
-        anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4)
+        # gt_np = gt.cpu().numpy()[0,0].astype(int)
+        # anomaly_map_resized = cv2.resize(anomaly_map, (args.input_size, args.input_size))
+        # anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4)
         
-        self.gt_list_px_lvl.extend(gt_np.ravel())
-        self.pred_list_px_lvl.extend(anomaly_map_resized_blur.ravel())
+        # self.gt_list_px_lvl.extend(gt_np.ravel())
+        # self.pred_list_px_lvl.extend(anomaly_map_resized_blur.ravel())
         self.gt_list_img_lvl.append(label.cpu().numpy()[0])
         self.pred_list_img_lvl.append(score)
         self.img_path_list.extend(file_name)
         # save images
-        x = self.inv_normalize(x)
-        input_x = cv2.cvtColor(x.permute(0,2,3,1).cpu().numpy()[0]*255, cv2.COLOR_BGR2RGB)
-        self.save_anomaly_map(anomaly_map_resized_blur, input_x, gt_np*255, file_name[0], x_type[0])
+        # x = self.inv_normalize(x)
+        # input_x = cv2.cvtColor(x.permute(0,2,3,1).cpu().numpy()[0]*255, cv2.COLOR_BGR2RGB)
+        # self.save_anomaly_map(anomaly_map_resized_blur, input_x, gt_np*255, file_name[0], x_type[0])
 
     def test_epoch_end(self, outputs):
-        print("Total pixel-level auc-roc score :")
-        pixel_auc = roc_auc_score(self.gt_list_px_lvl, self.pred_list_px_lvl)
-        print(pixel_auc)
-        print("Total image-level auc-roc score :")
-        img_auc = roc_auc_score(self.gt_list_img_lvl, self.pred_list_img_lvl)
-        print(img_auc)
-        print('test_epoch_end')
-        values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
-        self.log_dict(values)
+        # print("Total pixel-level auc-roc score :")
+        # pixel_auc = roc_auc_score(self.gt_list_px_lvl, self.pred_list_px_lvl)
+        # print(pixel_auc)
+        save_hist = True
+        save_prc = True
+        save_roc = True
+
+        if save_hist:
+            scores_dict = {}
+            scores_dict['scores'] = self.pred_list_img_lvl
+            scores_dict['labels'] = self.gt_list_img_lvl
+
+            hist = pd.DataFrame.from_dict(scores_dict)
+
+            # Filter normal and abnormal scores.
+            abn_scr = hist.loc[hist.labels == 1]['scores']
+            nrm_scr = hist.loc[hist.labels == 0]['scores']
+
+            # Create figure and plot the distribution.
+            sns.distplot(nrm_scr, label=r'Normal Scores', bins=20)
+            sns.distplot(abn_scr, label=r'Abnormal Scores', bins=20)
+            plt.legend()
+            plt.yticks([])
+            plt.xlabel(r'Anomaly Scores')
+            plt.savefig('histogram.png')
+
+
+        if save_prc:
+            precision, recall, thresholds = precision_recall_curve(
+                self.gt_list_img_lvl, self.pred_list_img_lvl)
+            prc_auc = auc(recall, precision)
+            fig, ax = plt.subplots()
+            ax.step(recall,precision,color='r',alpha=0.99,where='post')
+            ax.fill_between(recall, precision, alpha=0.2, color='b', step='post')
+            plt.xlabel('Recall')
+            plt.ylabel('Precision')
+            plt.ylim([0.0, 1.05])
+            plt.xlim([0.0, 1.0])
+            plt.savefig("PRC.png")
+
+        if save_roc:
+            fpr, tpr, _ = roc_curve(self.gt_list_img_lvl, self.pred_list_img_lvl)
+            eer = brentq(lambda x: 1. - x - interp1d(fpr, tpr)(x), 0., 1.)
+            roc_auc = auc(fpr, tpr)
+            plt.figure()
+            lw = 2
+            plt.plot(fpr, tpr, color='darkorange', lw=lw, label='(AUC = %0.2f, EER = %0.2f)' % (roc_auc, eer))
+            plt.plot([eer], [1-eer], marker='o', markersize=5, color="navy")
+            plt.plot([0, 1], [1, 0], color='navy', lw=1, linestyle=':')
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('Receiver operating characteristic')
+            plt.legend(loc="lower right")
+            plt.savefig(os.path.join('./', "ROC.png"))
+            plt.close()
+
+
+        median = np.median(self.pred_list_img_lvl)
+        print(median)
+        anomaly_score_binarized = [1 if x >= median else 0 for x in self.pred_list_img_lvl]
+        ras = roc_auc_score(self.gt_list_img_lvl, self.pred_list_img_lvl)
+        assert (roc_auc == ras)
+
+        result_table = BeautifulTable()
+        result_table.columns.header = ["Metric", "Result"]
+        result_table.rows.append(["F1-Score", f1_score(self.gt_list_img_lvl, anomaly_score_binarized)])
+        result_table.rows.append(["AUC-ROCs", roc_auc])
+        result_table.rows.append(["Average Precision", average_precision_score(self.gt_list_img_lvl, anomaly_score_binarized)])
+        result_table.rows.append(["Balanced Accuracy", balanced_accuracy_score(self.gt_list_img_lvl, anomaly_score_binarized)])
+        result_table.rows.append(["AUC-PRC", prc_auc])
+        print(result_table) 
+        cm = confusion_matrix(self.gt_list_img_lvl, anomaly_score_binarized)
+        print(cm)
+
+        # print("Total image-level auc-roc score :")
+        # img_auc = roc_auc_score(self.gt_list_img_lvl, self.pred_list_img_lvl)
+        # print(img_auc)
+        # print('test_epoch_end')
+        # values = { 'img_auc': img_auc}
+        # # values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
+        # self.log_dict(values)
+
         # anomaly_list = []
         # normal_list = []
         # for i in range(len(self.gt_list_img_lvl)):
@@ -344,17 +445,17 @@ class STPM(pl.LightningModule):
 
 def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
-    parser.add_argument('--phase', choices=['train','test'], default='train')
+    parser.add_argument('--phase', choices=['train','test','inference'], default='train')
     parser.add_argument('--dataset_path', default=r'/home/changwoo/hdd/datasets/mvtec_anomaly_detection') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='carpet')
-    parser.add_argument('--num_epochs', default=1)
+    parser.add_argument('--num_epochs', type=int, default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=256) # 256
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.001)
+    parser.add_argument('--coreset_sampling_ratio', type=float, default=0.001)
     parser.add_argument('--project_root_path', default=r'/home/changwoo/hdd/project_results/patchcore/test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
-    parser.add_argument('--save_src_code', default=True)
-    parser.add_argument('--save_anomaly_map', default=True)
+    parser.add_argument('--save_src_code', default=False)
+    parser.add_argument('--save_anomaly_map', default=False)
     parser.add_argument('--n_neighbors', type=int, default=9)
     args = parser.parse_args()
     return args
@@ -371,4 +472,36 @@ if __name__ == '__main__':
         trainer.test(model)
     elif args.phase == 'test':
         trainer.test(model)
+    elif args.phase == 'inference':
+        start = time.time()
+        embedding_dir_path = os.path.join('./', 'embeddings', args.category)
+        embedding_coreset = pickle.load(open(os.path.join(embedding_dir_path, 'embedding_77.5b-accuracy.pickle'), 'rb'))
+        
+        # load_image
+        img_path = glob.glob(os.path.join(args.project_root_path, args.category,args.phase) + "/*.jpg")
+        img = Image.open(img_path[0]).convert('RGB')
+        img = torch.unsqueeze(model.data_transforms(img),0)
+
+        # extract embedding
+        features = model(img)
+        embeddings = []
+        for feature in features:
+            m = torch.nn.AvgPool2d(3, 1, 1)
+            embeddings.append(m(feature))
+        embedding_ = embedding_concat(embeddings[0], embeddings[1])
+        embedding_test = np.array(reshape_embedding(np.array(embedding_)))
+
+        # NN
+        nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='brute', metric='minkowski', p=2).fit(embedding_coreset)
+        score_patches, _ = nbrs.kneighbors(embedding_test)
+        N_b = score_patches[np.argmax(score_patches[:,0])]
+        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+        score = w*max(score_patches[:,0]) # Image-level score
+
+        anomaly_th = 2.8912724729198906
+        print("Normal") if score < anomaly_th else print("Abnormal")
+        print("Score:",score)
+        inference_time = time.time() - start
+        print("Inference time",float(inference_time),"seconds")
+        
 
