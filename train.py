@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import time
+from tqdm import tqdm
 
 def copy_files(src, dst, ignores=[]):
     src_files = os.listdir(src)
@@ -351,7 +352,9 @@ class STPM(pl.LightningModule):
         save_hist = True
         save_prc = True
         save_roc = True
-
+        min_score = min(self.pred_list_img_lvl)
+        max_score = max(self.pred_list_img_lvl)
+        # print(min_score,max_score)
         if save_hist:
             scores_dict = {}
             scores_dict['scores'] = self.pred_list_img_lvl
@@ -366,6 +369,7 @@ class STPM(pl.LightningModule):
             # Create figure and plot the distribution.
             sns.distplot(nrm_scr, label=r'Normal Scores', bins=20)
             sns.distplot(abn_scr, label=r'Abnormal Scores', bins=20)
+            plt.xticks(np.arange(1.5, 4.5, 0.2))
             plt.legend()
             plt.yticks([])
             plt.xlabel(r'Anomaly Scores')
@@ -478,30 +482,29 @@ if __name__ == '__main__':
         embedding_coreset = pickle.load(open(os.path.join(embedding_dir_path, 'embedding_77.5b-accuracy.pickle'), 'rb'))
         
         # load_image
-        img_path = glob.glob(os.path.join(args.project_root_path, args.category,args.phase) + "/*.jpg")
-        img = Image.open(img_path[0]).convert('RGB')
-        img = torch.unsqueeze(model.data_transforms(img),0)
+        img_paths = glob.glob(os.path.join(args.project_root_path, args.category,args.phase) + "/*.jpg")
+        for img_path in tqdm(img_paths):
+            img = Image.open(img_path).convert('RGB')
+            img = torch.unsqueeze(model.data_transforms(img),0)
 
-        # extract embedding
-        features = model(img)
-        embeddings = []
-        for feature in features:
-            m = torch.nn.AvgPool2d(3, 1, 1)
-            embeddings.append(m(feature))
-        embedding_ = embedding_concat(embeddings[0], embeddings[1])
-        embedding_test = np.array(reshape_embedding(np.array(embedding_)))
+            # extract embedding
+            features = model(img)
+            embeddings = []
+            for feature in features:
+                m = torch.nn.AvgPool2d(3, 1, 1)
+                embeddings.append(m(feature))
+            embedding_ = embedding_concat(embeddings[0], embeddings[1])
+            embedding_test = np.array(reshape_embedding(np.array(embedding_)))
 
-        # NN
-        nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='brute', metric='minkowski', p=2).fit(embedding_coreset)
-        score_patches, _ = nbrs.kneighbors(embedding_test)
-        N_b = score_patches[np.argmax(score_patches[:,0])]
-        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
-        score = w*max(score_patches[:,0]) # Image-level score
+            # NN
+            nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='brute', metric='minkowski', p=2).fit(embedding_coreset)
+            score_patches, _ = nbrs.kneighbors(embedding_test)
+            N_b = score_patches[np.argmax(score_patches[:,0])]
+            w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+            score = w*max(score_patches[:,0]) # Image-level score
 
-        anomaly_th = 2.8912724729198906
-        print("Normal") if score < anomaly_th else print("Abnormal")
-        print("Score:",score)
-        inference_time = time.time() - start
-        print("Inference time",float(inference_time),"seconds")
-        
-
+            anomaly_th = 2.8912724729198906
+            print("Normal") if score < anomaly_th else print("Abnormal")
+            print("Score:",score)
+            inference_time = time.time() - start
+            print("Inference time",float(inference_time),"seconds")
